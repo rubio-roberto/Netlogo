@@ -9,7 +9,6 @@ globals [
   DIAS-PASTOREO           ;; cálculo de los días totales de pastoreo (versión publicable)
   Disp-Minima
   disponibilidad-inicial-parcelas ;; Es una lista global que guarda, una sola vez, la disponibilidad media inicial
-  has sup-pach            ;; Superficie total (ha) y superficie por patch (ha)
   makgms mikgms           ;; Valores máximo y mínimo de kg MS por patch
   mejor-parcela           ;; Guarda la parcela con mejores condiciones para pastoreo
   n-vacas         ;; cantidad de vacas
@@ -21,6 +20,9 @@ globals [
   ticks-totales           ;; Total de ticks a simular (según los días de pastoreo)
   total-kgms-inicio-dia
   umbral-disponibilidad     ;; Establece que una variable para los 1100 kg de disponibilidad no consumida
+  has                       ;; ha totales del sistema (constante física)
+  cantidad-patches          ;; total de patches del mundo
+  sup-pach                  ;; ha representadas por cada patch
   vacas-a-seguir            ;; Lista de IDs de vacas a monitorear por tick
 
 
@@ -49,7 +51,9 @@ to setup
   construir-espacio
   inicializar-agentes
   configurar-ciclo-temporal
+  display  ;; Fuerza actualización de vista y monitores
   mostrar-mensaje-inicial
+  display  ;; Fuerza actualización de vista y monitores
 
 end
 
@@ -62,6 +66,7 @@ to limpiar-sistema
   set contador-ticks 0
   set ticks-actuales-parcela 0
   set consumo-total-simulacion 0
+
 end
 
 to definir-escenario
@@ -74,24 +79,27 @@ to definir-escenario
   set n-vacas one-of lista-vacas
   set TCrec one-of lista-TCrec
   set Disp-Minima one-of lista-DispMin
+  display  ;; Fuerza actualización de vista y monitores
+
+  set has 200
+  set cantidad-patches count patches
+  set sup-pach has / cantidad-patches
 
 end
 
 to construir-espacio
 
   ;; valores base fijos
-  set n-parcelas 8
-  set dias-permanencia 8
+  set n-parcelas 2
+  set dias-permanencia 30
   set vueltas 1
 
   set parcela-pastoreo n-parcelas
 
   parcelas
 
-  ;; cálculo superficie
-  let patches-en-una-parcela count patches with [plabel = 1]
-  set sup-pach (200 / n-parcelas) / patches-en-una-parcela
-  set has sup-pach * count patches with [plabel > 0]
+  ;; superficie física NO se recalcula
+  set has  200 ;; constante
 
   ;; parámetros de disponibilidad
   set mikgms Disp-Minima
@@ -125,22 +133,11 @@ to re-construir-espacio
 
   parcelas
 
+ ;; =====================================================
+;; 4. Superficie física constante
+;; =====================================================
 
-  ;; =====================================================
-  ;; 4. Recalcular superficie correctamente
-  ;; =====================================================
-
-  ;; Superficie total del sistema = 200 ha (constante)
-  ;; La superficie de cada patch se ajusta según n-parcelas
-
-  let patches-en-una-parcela count patches with [plabel = 1]
-
-  if patches-en-una-parcela > 0 [
-    set sup-pach (200 / n-parcelas) / patches-en-una-parcela
-  ]
-
-  ;; Superficie total del sistema
-  set has sup-pach * count patches with [plabel > 0]
+set has 200
 
 
   ;; =====================================================
@@ -152,21 +149,49 @@ to re-construir-espacio
 
 end
 
-
 to parcelas
-  let intervalo (33 / (parcela-pastoreo / 2))
-  let parcela 1
-  repeat parcela-pastoreo / 2 [
-    ask patches [
-      if pycor > (world-height / 2) and pxcor >= (parcela - 1) * intervalo and pxcor < parcela * intervalo [
-        set plabel parcela
-      ]
-      if pycor <= (world-height / 2) and pxcor >= (parcela - 1) * intervalo and pxcor < parcela * intervalo [
-        set plabel parcela + (parcela-pastoreo / 2)
-      ]
-    ]
-    set parcela parcela + 1
+
+  if parcela-pastoreo mod 2 != 0 [
+    user-message "El número de parcelas debe ser par para mantener la estructura en dos franjas."
+    stop
   ]
+  ;; Verifica que el número de parcelas sea par.
+  ;; Si es impar, muestra un mensaje al usuario y detiene la ejecución.
+
+  let intervalo (world-width / (parcela-pastoreo / 2))
+  ;; Calcula el ancho horizontal de cada parcela dentro de una de las dos franjas (superior e inferior)
+
+  let parcela 1
+  ;; Variable auxiliar que identifica el número de parcela que se está construyendo
+
+  repeat parcela-pastoreo / 2 [
+  ;; Se repite el proceso tantas veces como parcelas haya en cada mitad del mundo
+
+    ask patches [
+    ;; Se evalúan todos los patches del mundo para asignarles su número de parcela
+
+      if pycor > (world-height / 2)
+         and pxcor >= (parcela - 1) * intervalo
+         and pxcor < parcela * intervalo [
+        set plabel parcela
+        ;; Asigna el número de parcela a los patches ubicados en la mitad superior,
+        ;; dentro del intervalo horizontal correspondiente
+      ]
+
+      if pycor <= (world-height / 2)
+         and pxcor >= (parcela - 1) * intervalo
+         and pxcor < parcela * intervalo [
+        set plabel parcela + (parcela-pastoreo / 2)
+        ;; Asigna el número de parcela a los patches ubicados en la mitad inferior,
+        ;; sumando la mitad del total para mantener numeración continua
+      ]
+
+    ]
+
+    set parcela parcela + 1     ;; Incrementa el contador para construir la siguiente franja vertical
+
+  ]
+
 end
 
 to gestionar-kgms [modo] ;; Maneja la carga de MS en los patches según el modo
@@ -222,7 +247,7 @@ to mostrar-mensaje-inicial
   let dias-totales dias-permanencia * n-parcelas * vueltas
 
   user-message (word
-    "Usted tendrá " n-vacas " vacas en un campo de 200 has,"
+    "Usted tendrá " n-vacas " vacas en un campo de " has " has,"
     " con una disponibilidad mínima de " Disp-Minima " KgMS/Ha"
     " que crece a razón de " TCrec " KgMS/Ha/Día, "
     "subdividido en " n-parcelas " potreros, "
@@ -244,6 +269,7 @@ to reprogramar-pastoreo
   ;; =====================================================
 
   reset-ticks
+  clear-all-plots   ;; Limpia todos los gráficos antes de recalcular
   set contador-ticks 0
   set ticks-actuales-parcela 0
   set consumo-total-simulacion 0
@@ -315,7 +341,7 @@ to mostrar-mensaje-Reprogramar
   let dias-totales dias-permanencia * n-parcelas * vueltas
 
   user-message (word
-    "Usted propone que sus " n-vacas " vacas en un campo de 200 has,"
+    "Usted propone que sus " n-vacas " vacas en un campo de " has "has,"
     " con una disponibilidad mínima de " Disp-Minima " KgMS/Ha"
     " que crece a razón de " TCrec " KgMS/Ha/Día. ""\n"
     "Sea subdividido en " n-parcelas " potreros, "
@@ -545,7 +571,7 @@ to go
 
   tick
   ;; Avanza el reloj del modelo un tick
-
+  display  ;; Fuerza actualización de vista y monitores
 end
 
 
@@ -1117,7 +1143,7 @@ to cerrar-simulacion
     consumo-diario-rodeo " kg de MS/día." "\n\n"
     "Producción teórica total estimada del campo: "
     produccion-teorica " kg de MS." "\n"
-    "Producción diaria estimada del campo (200 ha): "
+    "Producción diaria estimada del campo (" has "ha): "
     produccion-diaria-campo " kg de MS/día." "\n\n"
     "Puede revisar los resultados en la consola o "
     "reprogramar el pastoreo para una nueva simulación."
@@ -1195,6 +1221,29 @@ to Disponibilidades-Finales
   set-current-plot-pen "Fin-Max"
   plotxy 8 disp-max-final
 end
+
+to-report consumo-promedio-diario-vaca
+
+  if ticks = 0 [ report 0 ]
+
+  let dias-completos floor (ticks / ticks-por-dia)
+
+  let consumo-acumulado consumo-total-simulacion
+
+  ;; consumo parcial del día en curso
+  let consumo-hoy sum [consumo-diario] of vacas
+
+  let consumo-total consumo-acumulado + consumo-hoy
+
+  let dias-equivalentes
+      (dias-completos + ((ticks mod ticks-por-dia) / ticks-por-dia))
+
+  report precision
+         (consumo-total /
+         (dias-equivalentes * count vacas))
+         2
+
+end
 @#$#@#$#@
 GRAPHICS-WINDOW
 209
@@ -1224,10 +1273,10 @@ ticks
 30.0
 
 BUTTON
-23
-17
-179
-66
+27
+12
+183
+61
 Iniciar Campo
 setup
 NIL
@@ -1253,9 +1302,9 @@ mean [kgms / sup-pach] of patches
 
 MONITOR
 548
-485
-643
-530
+473
+632
+518
 Ultima¨Parcela
 mean [kgms / sup-pach] of patches with [plabel = n-parcelas]
 0
@@ -1263,10 +1312,10 @@ mean [kgms / sup-pach] of patches with [plabel = n-parcelas]
 11
 
 MONITOR
-212
-98
-290
-143
+220
+111
+298
+156
 P1 KgMS/Ha
 mean [kgms / sup-pach] of patches with [ plabel = 1]
 0
@@ -1274,10 +1323,10 @@ mean [kgms / sup-pach] of patches with [ plabel = 1]
 11
 
 BUTTON
-7
-227
-160
-274
+17
+406
+174
+453
 Pastorear
 go
 T
@@ -1294,16 +1343,16 @@ PLOT
 651
 16
 901
-166
+251
 Consumo Diario (KgMS)
 Día
 KgMS
 9.0
 10.0
-5.0
+7.0
 7.0
 true
-false
+true
 "" ""
 PENS
 "Máximo" 1.0 0 -2674135 true "" ""
@@ -1313,9 +1362,9 @@ PENS
 
 PLOT
 653
-434
+592
 902
-675
+833
 Rango de Disponibilidad (kg MS/ha)
 Parcela
 Disponibilidad
@@ -1354,22 +1403,22 @@ PENS
 "Final" 0.5 1 -2674135 true "" ""
 
 PLOT
-654
-178
-903
-429
+655
+320
+904
+571
 Disponibilidad
 Días
 Disponibilidad media (kg MS/ha) 
 0.0
 10.0
 2000.0
-10.0
+1100.0
 true
 false
 "" ""
 PENS
-"Media sistema" 1.0 0 -16777216 true "" ""
+"Media sistema" 2.0 0 -16777216 true "" ""
 
 CHOOSER
 6
@@ -1378,34 +1427,34 @@ CHOOSER
 113
 n-parcelas
 n-parcelas
-4 8 12 16 20
-1
+2 4 8 12 16 20
+0
 
 CHOOSER
-112
-70
+103
+68
 204
-115
+113
 dias-permanencia
 dias-permanencia
-1 2 3 5 8 12 17 23
-4
+1 2 3 5 8 12 17 23 30
+8
 
 CHOOSER
-58
-123
-150
-168
+4
+122
+96
+167
 Vueltas
 Vueltas
 1 2 3 4
 0
 
 MONITOR
-17
-289
-145
-334
+101
+123
+203
+168
 Días Est.Pastoreo
 dias-permanencia * n-parcelas * vueltas
 0
@@ -1446,9 +1495,9 @@ Disp-Minima
 20
 
 BUTTON
-5
+27
 172
-162
+184
 223
 Reprogramar Pastoreo
 Reprogramar-Pastoreo
@@ -1463,10 +1512,10 @@ NIL
 0
 
 SWITCH
-93
-395
-207
-428
+33
+360
+147
+393
 Regenerar
 Regenerar
 1
@@ -1474,14 +1523,36 @@ Regenerar
 -1000
 
 TEXTBOX
-218
-365
-544
-484
-              ´Regenerar´\n ON: SI CAMBIA. supone que el pastoreo anterior era de la misma manera que se propone actualmente.\n OFF: NO CAMBIA la disponibilidad de las parcelas al Reprogramar Pastoreo.
 14
-9.9
+231
+196
+350
+              ´Regenerar´\n ON: SI CAMBIA. supone que el pastoreo anterior era de la misma manera que se propone actualmente.\n OFF: NO CAMBIA la disponibilidad de las parcelas al Reprogramar Pastoreo.
+12
+0.0
 1
+
+MONITOR
+656
+266
+755
+315
+Disp.Media
+mean [kgms / sup-pach] of patches
+0
+1
+12
+
+MONITOR
+802
+268
+904
+313
+Cons.Medio
+consumo-promedio-diario-vaca
+17
+1
+11
 
 @#$#@#$#@
 ## Título:
