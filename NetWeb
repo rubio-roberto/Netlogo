@@ -1,0 +1,5 @@
+como ingresar el archivo a ejecución de betlogo web
+abrir netlogoweb
+incluir en la direccioón del modelo el siguiente enlace:
+https://netlogoweb.org/launch#https://raw.githubusercontent.com/rubio-roberto/Netlogo/main/Pastoreo%20Educativo.nlogo
+debe aparecer el modelo en pantalla
