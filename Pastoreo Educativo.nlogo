@@ -197,9 +197,8 @@ end
 to gestionar-kgms [modo] ;; Maneja la carga de MS en los patches según el modo
   ask patches [
     ifelse (modo = "inicializar") [ ;; Si se está inicializando
-      set kgms ((mikgms +
-  (plabel * (makgms - mikgms) / n-parcelas) *
-  ((random 200) / 200)) * sup-pach) ;; convierte de kgMS/ha a kgMS reales en el patch
+      set kgms ((mikgms + (plabel * (makgms - mikgms) / n-parcelas) * ((random 200) / 200)) * sup-pach)
+       ;; esta fila previa convierte de kgMS/ha a kgMS reales en el patch
   set dms 0.65
     ] [
       let CreMed-Tick (TCrec * sup-pach) / ticks-por-dia ;; convierte TCrec (kgMS/ha/día) a kgMS/patch/tick
@@ -303,6 +302,7 @@ to reprogramar-pastoreo
 
   if Regenerar [
     ;; Reinicia heterogeneidad y kgms
+    set mikgms Disp-Minima
     gestionar-kgms "inicializar"
   ]
 
@@ -385,9 +385,7 @@ to calc-coef-hambre
 
       ;; Función no lineal de hambre (p = 4.51)
       set coef-hambre max list 0 (1 - (x ^ 4.51))
-
     ]
-
   ]
 
 end
@@ -437,7 +435,7 @@ to crear-animales  ;; Crea las vacas y las inicializa
     set consumo-acum-48 0
 
     ;; Hambre máxima al inicio
-    set coef-hambre 1
+    set coef-hambre 0.7
 
   ]
 end
@@ -954,7 +952,7 @@ to cerrar-dia
   ;; ============================================================
 
   actualizar-grafico-consumo
-  actualizar-grafico-disponibilidad
+ ; actualizar-grafico-disponibilidad
 
 
   ;; ============================================================
@@ -1037,8 +1035,12 @@ to graficar-disponibilidad-parcelas
   set parcela-id 1
   while [parcela-id <= n-parcelas] [
     ;; Nota: acá se calcula “final” como estado actual
-    let disp-final (mean [kgms] of patches with [plabel = parcela-id] / sup-pach)
-    plotxy (parcela-id + 0.2) disp-final
+    let conjunto patches with [plabel = parcela-id]
+
+if any? conjunto [
+  let disp-final (mean [kgms] of conjunto / sup-pach)
+  plotxy (parcela-id + 0.2) disp-final
+]
     set parcela-id parcela-id + 1
   ]
 end
@@ -1079,15 +1081,15 @@ to-report calcular-disponibilidad-media-por-parcela
   report lista
 end
 
-to actualizar-grafico-disponibilidad
+; to actualizar-grafico-disponibilidad
   ;; Actualiza el gráfico de línea con la disponibilidad
   ;; media del sistema expresada en kg MS / ha
 
-  set-current-plot "Disponibilidad"
-  set-current-plot-pen "Media sistema"
+;  set-current-plot "Disponibilidad"
+;  set-current-plot-pen "Media sistema"
 
-  plot mean [kgms / sup-pach] of patches
-end
+;  plot mean [kgms / sup-pach] of patches
+;end
 
 
 
@@ -1418,7 +1420,7 @@ true
 false
 "" ""
 PENS
-"Media sistema" 2.0 0 -16777216 true "" ""
+"Media sistema" 2.0 0 -16777216 true "" "if sup-pach > 0 [\n  plot mean [kgms / sup-pach] of patches\n]"
 
 CHOOSER
 6
@@ -1428,7 +1430,7 @@ CHOOSER
 n-parcelas
 n-parcelas
 2 4 8 12 16 20
-0
+2
 
 CHOOSER
 103
@@ -1438,7 +1440,7 @@ CHOOSER
 dias-permanencia
 dias-permanencia
 1 2 3 5 8 12 17 23 30
-8
+4
 
 CHOOSER
 4
@@ -1518,7 +1520,7 @@ SWITCH
 393
 Regenerar
 Regenerar
-1
+0
 1
 -1000
 
@@ -1544,15 +1546,26 @@ mean [kgms / sup-pach] of patches
 12
 
 MONITOR
-802
-268
-904
-313
+759
+266
+844
+315
 Cons.Medio
 consumo-promedio-diario-vaca
-17
 1
-11
+1
+12
+
+MONITOR
+849
+265
+906
+314
+Día
+round (ticks / 48)
+0
+1
+12
 
 @#$#@#$#@
 ## Título:
