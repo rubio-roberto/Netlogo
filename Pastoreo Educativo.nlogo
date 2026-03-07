@@ -1,9 +1,15 @@
 breed [vacas vaca] ;; Define una raza llamada "vacas" con individuos del tipo "vaca"
+breed [rollos rollo]
+breed [postes poste]
+undirected-link-breed [alambrados alambrado]
 
 globals [
 
-  Area-Animal peso        ;; Área ocupada por una vaca según su peso
+  Area-Animal   ;; Área ocupada por una vaca según su peso
+  peso        ;; peso proyectado de las vacas
   consumo-total-simulacion   ;; kg MS consumidos por todas las vacas en toda la simulación
+  consumo-min-historico    ;; menor consumo diario individual observado en toda la corrida
+  consumo-max-historico    ;; mayor consumo diario individual observado en toda la corrida
   contador-ticks          ;; Conteo total de ticks
   crecimiento-diario-total   ;; kg MS acumulados por crecimiento durante el día
   DIAS-PASTOREO           ;; cálculo de los días totales de pastoreo (versión publicable)
@@ -12,37 +18,48 @@ globals [
   makgms mikgms           ;; Valores máximo y mínimo de kg MS por patch
   mejor-parcela           ;; Guarda la parcela con mejores condiciones para pastoreo
   n-vacas         ;; cantidad de vacas
-  parcela-pastoreo        ;; Parcela actualmente seleccionada para pastoreo
+  parcela-pastoreo          ;; Parcela actualmente seleccionada para pastoreo
   promedio-kgms-inicio-dia  ;; Guarda el promedio de MS en la parcela al inicio del día
   TCrec
-  ticks-actuales-parcela  ;; Ticks transcurridos en la parcela actual
-  ticks-por-dia           ;; Número de ticks que representan un día
-  ticks-totales           ;; Total de ticks a simular (según los días de pastoreo)
+  ticks-actuales-parcela    ;; Ticks transcurridos en la parcela actual
+  ticks-por-dia             ;; Número de ticks que representan un día
+  ticks-totales             ;; Total de ticks a simular (según los días de pastoreo)
   total-kgms-inicio-dia
   umbral-disponibilidad     ;; Establece que una variable para los 1100 kg de disponibilidad no consumida
   has                       ;; ha totales del sistema (constante física)
   cantidad-patches          ;; total de patches del mundo
   sup-pach                  ;; ha representadas por cada patch
   vacas-a-seguir            ;; Lista de IDs de vacas a monitorear por tick
-
+  historial-pastoreo        ;; lista guarda el orden de parcelas visitadas durante la simulación
+  historial-salteos
+  excedente-detectado       ;; excedente de forraje detectado
+  kgms-por-rollo            ;; peso de los rollos
+  rollos-iniciales          ;; cantidad de rollos al inicializar la simulación
+  who-primer-rollo          ;; numero del primer rollo creado
 
 ]
 
-patches-own
-[
-  kgms consumo-tick  ;; consumo-tick se usa para acumular lo extraído en cada tick
-  dms                ;; Digestibilidad de la materia seca (0–1)
+patches-own [
+  kgms                ;; disponibilidad del patch en Kg MS
+  consumo-tick        ;; consumo-tick se usa para acumular lo extraído en cada tick
+  dms                      ;; Digestibilidad de la materia seca (0–1)
+  crecimiento-tick         ;; crecimiento de MS por patch y por tick, calculado a partir del crecimiento diario sorteado (0–2 × crecimiento medio)
 ]
+
+postes-own [tipo-poste               ;; Identifica el tipo de poste (central, perimetral, subdivisión, etc.)
+]
+
 vacas-own [
   coef-hambre              ;; 0–1, motivación de consumo
   consumos-48              ;; lista de los últimos 48 consumos (kg MS/tick)
   consumo-acum-48          ;; suma de la ventana móvil (kg MS)
-  Cs-Kgms           ;; Consumo de MS en el tick actual
-  consumo-diario    ;; Acumulador del consumo diario
-  historial-consumo ;; Lista del consumo diario por vaca
-  pV        ;; Peso vivo individual de la vaca (kg)
-  CsEM      ;; Consumo diario de Energía Metabolizable (Mcal/día)
-  EM-mant   ;; Requerimiento energético de mantenimiento (Mcal/día)
+  Cs-Kgms                  ;; Consumo de MS en el tick actual
+  consumo-diario           ;; Acumulador del consumo diario
+  historial-consumo        ;; Lista del consumo diario por vaca
+  pV                       ;; Peso vivo individual de la vaca (kg) en cada día
+  pv-inicial               ;; peso vivo inicial de las vacas (Kg)
+  CsEM                     ;; Consumo diario de Energía Metabolizable (Mcal/día)
+  EM-mant                  ;; Requerimiento energético de mantenimiento (Mcal/día)
 ]
 
 to setup
@@ -51,10 +68,13 @@ to setup
   construir-espacio
   inicializar-agentes
   configurar-ciclo-temporal
-  display  ;; Fuerza actualización de vista y monitores
-  mostrar-mensaje-inicial
-  display  ;; Fuerza actualización de vista y monitores
 
+  dibujar-infraestructura-campo
+  dibujar-alambrados-internos
+  crear-rollos
+
+  mostrar-mensaje-inicial
+   display
 end
 
 to limpiar-sistema
@@ -66,14 +86,16 @@ to limpiar-sistema
   set contador-ticks 0
   set ticks-actuales-parcela 0
   set consumo-total-simulacion 0
+  set historial-pastoreo []
+  set excedente-detectado false
 
 end
 
 to definir-escenario
 
   ;; Escenarios posibles
-  let lista-vacas [100 200 300 400 ]
-  let lista-TCrec [10 25 40 50 60 80]
+  let lista-vacas [200 300 400 500 600]
+  let lista-TCrec [5 10 25 40 50 60]
   let lista-DispMin [900 1000 1100]
 
   set n-vacas one-of lista-vacas
@@ -201,10 +223,24 @@ to gestionar-kgms [modo] ;; Maneja la carga de MS en los patches según el modo
        ;; esta fila previa convierte de kgMS/ha a kgMS reales en el patch
   set dms 0.65
     ] [
-      let CreMed-Tick (TCrec * sup-pach) / ticks-por-dia ;; convierte TCrec (kgMS/ha/día) a kgMS/patch/tick
-      let crecimiento-realizado (CreMed-Tick * random-float 1) ;; agrega variabilidad entre 0–100%
-      set kgms kgms + crecimiento-realizado ;; aplica crecimiento al patch
-      set crecimiento-diario-total crecimiento-diario-total + crecimiento-realizado
+      ;; ------------------------------------------------
+      ;; SORTEO DE CRECIMIENTO DIARIO POR PATCH
+      ;; ------------------------------------------------
+
+      if ticks mod ticks-por-dia = 0 [
+
+        let factor random-float 2
+        let crecimiento-dia (TCrec * sup-pach * factor)
+
+        set crecimiento-tick crecimiento-dia / ticks-por-dia
+      ]
+
+      ;; ------------------------------------------------
+      ;; CRECIMIENTO EN CADA TICK
+      ;; ------------------------------------------------
+
+      set kgms kgms + crecimiento-tick
+      set crecimiento-diario-total crecimiento-diario-total + crecimiento-tick
     ]
   ]
   colorear-parcelas ;; Actualiza visualización
@@ -218,7 +254,7 @@ end
 
 to inicializar-agentes
 
-  set peso 450
+  set peso 380
   let factor 200 / (400 ^ 0.75) / 10000
   set Area-Animal factor * (peso ^ 0.75)
 
@@ -230,8 +266,8 @@ to inicializar-agentes
   if count vacas < 3 [
     set vacas-a-seguir [who] of vacas
   ]
-
 end
+
 to configurar-ciclo-temporal
 
   set DIAS-PASTOREO dias-permanencia * n-parcelas * vueltas
@@ -272,6 +308,9 @@ to reprogramar-pastoreo
   set contador-ticks 0
   set ticks-actuales-parcela 0
   set consumo-total-simulacion 0
+  set historial-pastoreo []
+  set historial-salteos []
+  set excedente-detectado false
 
   ;; Recalcular duración del ciclo con valores actuales de sliders
   configurar-ciclo-temporal
@@ -329,8 +368,8 @@ to reprogramar-pastoreo
   set disponibilidad-inicial-parcelas
       calcular-disponibilidad-media-por-parcela
 
+  dibujar-alambrados-internos
   graficar-disponibilidad-parcelas
-
   mostrar-mensaje-Reprogramar
 
 end
@@ -353,7 +392,6 @@ to mostrar-mensaje-Reprogramar
     "Si desea modificar algún elemento de la planificación, "
     "utilice 'Reprogramar Pastoreo'."
   )
-
 end
 
 to iniciar-simulacion
@@ -362,7 +400,7 @@ to iniciar-simulacion
 end
 
 to calcular-CsEM
-  ask turtles [
+  ask vacas [
     let dms-patch [dms] of patch-here
     set CsEM round ( (consumo-diario * 3.608 * dms-patch) * 10 ) / 10
   ]
@@ -373,18 +411,35 @@ to calc-coef-hambre
   ask vacas [
 
     ;; Consumo máximo diario teórico (kg MS/día)
-    let Cmax (0.025 * pV)
+    let Cmax (0.025 * peso)
 
     if Cmax > 0 [
 
       ;; Proporción consumida del máximo diario
       let x consumo-acum-48 / Cmax
 
-      ;; Limitar x a 1 como máximo (evita valores >1 por redondeos)
+      ;; Limitar x a 1 como máximo
       if x > 1 [ set x 1 ]
 
-      ;; Función no lineal de hambre (p = 4.51)
-      set coef-hambre max list 0 (1 - (x ^ 4.51))
+      ;; ------------------------------------------------
+      ;; HAMBRE BASE (por consumo reciente)
+      ;; ------------------------------------------------
+      let hambre-base max list 0 (1 - (x ^ 4.51))
+
+      ;; ------------------------------------------------
+      ;; EFECTO DEL PESO CORPORAL
+      ;; ------------------------------------------------
+      let desv (pV - peso) / peso
+      let factor-peso 1 - desv
+
+      ;; limitar rango fisiológico razonable
+      set factor-peso max list 0.8 min list factor-peso 1.2
+
+      ;; ------------------------------------------------
+      ;; COEFICIENTE FINAL
+      ;; ------------------------------------------------
+      set coef-hambre hambre-base * factor-peso
+
     ]
   ]
 
@@ -411,14 +466,19 @@ to crear-animales  ;; Crea las vacas y las inicializa
 
     ;; Aspecto visual
     set shape "cow"
-    set color brown
+    set color black / white
     set size 1
 
     ;; -----------------------------
     ;; VARIABLES PRODUCTIVAS
     ;; -----------------------------
 
-    set pV peso                  ;; Peso vivo individual
+    let pv-temp random-normal peso (peso * 0.10)
+
+    set pV max list (peso * 0.8)
+          min list pv-temp (peso * 1.2)                 ;; Peso vivo individual pV∈[0.8×peso,1.2×peso]
+    set pv-inicial pV
+
     set Cs-Kgms 0                ;; Consumo del tick actual
     set consumo-diario 0         ;; Acumulador diario
     set CsEM 0                   ;; Consumo energético diario
@@ -430,17 +490,35 @@ to crear-animales  ;; Crea las vacas y las inicializa
 
     set historial-consumo []     ;; Historial largo (días)
 
-    ;; Ventana móvil para regulación de hambre
-    set consumos-48 n-values ticks-por-dia [0]
-    set consumo-acum-48 0
+    ;; -------------------------------------------------
+    ;; INICIALIZACIÓN DE LA MEMORIA DE CONSUMO (48 ticks)
+    ;; -------------------------------------------------
 
-    ;; Hambre máxima al inicio
-    set coef-hambre 0.7
+    ;; Consumo máximo teórico diario
+    let Cmax 0.025 * pV
+
+    ;; Consumo ficticio inicial equivalente al 70% de Cmax
+    let consumo-inicial-total 0.7 * Cmax
+
+    ;; Consumo promedio por tick en esa historia ficticia
+    let consumo-tick-inicial consumo-inicial-total / ticks-por-dia
+
+    ;; Crear lista ficticia de 48 ticks
+    set consumos-48 n-values ticks-por-dia [consumo-tick-inicial]
+
+    ;; Suma acumulada coherente con la lista
+    set consumo-acum-48 consumo-inicial-total
 
   ]
+  graficar-distribucion-peso-vacas
+
 end
 
 to go
+   if ticks = 0 [
+    imprimir-configuracion
+    set historial-pastoreo lput parcela-pastoreo historial-pastoreo
+  ]
   ;; ============================================================
   ;; CONTROL GENERAL DE LA SIMULACIÓN
   ;; ============================================================
@@ -594,7 +672,29 @@ to-report calcular-total-kgms-final [nro-parcela]
   report sum [kgms] of patches with [plabel = nro-parcela]
 end
 
+to-report contar-rangos-peso-inicial
 
+  let r1 count vacas with [pv-inicial < peso * 0.90]
+  let r2 count vacas with [pv-inicial >= peso * 0.90 and pv-inicial < peso * 0.95]
+  let r3 count vacas with [pv-inicial >= peso * 0.95 and pv-inicial < peso * 1.05]
+  let r4 count vacas with [pv-inicial >= peso * 1.05 and pv-inicial < peso * 1.10]
+  let r5 count vacas with [pv-inicial >= peso * 1.10]
+
+  report (list r1 r2 r3 r4 r5)
+
+end
+
+to-report contar-rangos-peso-actual
+
+  let r1 count vacas with [pV < peso * 0.90]
+  let r2 count vacas with [pV >= peso * 0.90 and pV < peso * 0.95]
+  let r3 count vacas with [pV >= peso * 0.95 and pV < peso * 1.05]
+  let r4 count vacas with [pV >= peso * 1.05 and pV < peso * 1.10]
+  let r5 count vacas with [pV >= peso * 1.10]
+
+  report (list r1 r2 r3 r4 r5)
+
+end
 
 
 to control-pastoreo
@@ -609,28 +709,21 @@ to control-pastoreo
     print (word "Reiniciando pastoreo. Parcela actual: " parcela-pastoreo)
     set parcela-pastoreo -1
   ]
-
-
 end
 
-to cambiar-parcela ;; Gestiona el paso a una nueva parcela
-  let ticks-por-permanencia dias-permanencia * ticks-por-dia ;; Cálculo por días
+to cambiar-parcela
 
-  if ticks-actuales-parcela < ticks-por-permanencia [
-    set ticks-actuales-parcela ticks-actuales-parcela + 1 ;; Continúa en parcela
+  let ticks-por-permanencia dias-permanencia * ticks-por-dia
+
+  ifelse ticks-actuales-parcela < ticks-por-permanencia
+  [
+    set ticks-actuales-parcela ticks-actuales-parcela + 1
+  ]
+  [
+    set ticks-actuales-parcela 0
+    elegir-siguiente-parcela
   ]
 
-  if ticks-actuales-parcela >= ticks-por-permanencia [
-    set ticks-actuales-parcela 0 ;; Reinicia contador
-    ifelse parcela-pastoreo > 1 [
-      set parcela-pastoreo parcela-pastoreo - 1 ;; Va a la siguiente
-    ] [
-      set parcela-pastoreo n-parcelas ;; Reinicia
-    ]
-    ask vacas [
-      move-to one-of patches with [plabel = parcela-pastoreo] ;; Reubica vacas
-    ]
-  ]
 end
 
 to mover-vacas-en-parcela ;; Mueve vacas en su parcela
@@ -672,7 +765,7 @@ to comer
       ask vacas-en-patch [
 
         ;; Consumo máximo fisiológico diario
-        let consumo-max-diario 0.025 * pV
+        let consumo-max-diario 0.025 * peso
         let consumo-restante consumo-max-diario - consumo-diario
 
         if consumo-restante > 0 [
@@ -725,11 +818,24 @@ to comer
 end
 
 to actualizar-ventana-consumo
+
+  ;; ventana móvil de consumo de 48 ticks
+  ;; la lista consumos-48 mantiene el historial de consumo reciente
+  ;; y consumo-acum-48 guarda su suma para evitar recalcularla
+
   ask vacas [
-    let consumo-viejo first consumos-48                              ;; Valor más antiguo que sale de la ventana
-    set consumos-48 lput Cs-Kgms but-first consumos-48               ;; Actualizar lista: eliminar primero y agregar consumo actual
-    set consumo-acum-48 consumo-acum-48 - consumo-viejo + Cs-Kgms    ;; Actualizar acumulado de forma eficiente
+
+    ;; consumo más antiguo que sale de la ventana
+    let viejo first consumos-48
+
+    ;; actualizar lista de consumos
+    set consumos-48 lput Cs-Kgms but-first consumos-48
+
+    ;; actualizar suma acumulada de forma eficiente
+    set consumo-acum-48 consumo-acum-48 + Cs-Kgms - viejo
+
   ]
+
 end
 
 to calcular-EM-mantenimiento
@@ -843,36 +949,43 @@ end
 
 to cerrar-dia
 
-  ;; ============================================================
-  ;; IDENTIFICACIÓN DEL DÍA
-  ;; ============================================================
-
   let dia ticks / ticks-por-dia
 
+  registrar-consumo-diario
 
-  ;; ============================================================
-  ;; REGISTRO DEL CONSUMO DIARIO INDIVIDUAL
-  ;; ============================================================
+  let stats-consumo calcular-estadisticos-consumo
+  let stats-forraje calcular-balance-forrajero (item 3 stats-consumo)
+
+  reportar-dia dia stats-consumo stats-forraje
+
+  actualizar-rodeo stats-consumo
+
+  reiniciar-variables-diarias stats-consumo
+
+end
+
+to registrar-consumo-diario
 
   ask vacas [
     set historial-consumo lput consumo-diario historial-consumo
   ]
 
+end
 
-  ;; ============================================================
-  ;; ESTADÍSTICOS DE CONSUMO
-  ;; ============================================================
+to-report calcular-estadisticos-consumo
 
   let consumos-dia [consumo-diario] of vacas
+
   let promedio-consumo mean consumos-dia
   let max-consumo max consumos-dia
   let min-consumo min consumos-dia
   let total-consumo sum consumos-dia
 
+  report (list promedio-consumo max-consumo min-consumo total-consumo)
 
-  ;; ============================================================
-  ;; ESTADO DEL FORRAJE
-  ;; ============================================================
+end
+
+to-report calcular-balance-forrajero [total-consumo]
 
   let promedio-kgms-final-dia
       calcular-disponibilidad-ha parcela-pastoreo
@@ -880,25 +993,27 @@ to cerrar-dia
   let total-inicial total-kgms-inicio-dia
   let total-final calcular-total-kgms-final parcela-pastoreo
 
-  ;; ============================================================
-  ;; BALANCE ECOLÓGICO EXPLÍCITO
-  ;; ============================================================
-
-  ;; Ecuación conceptual:
-  ;; Stock final = Stock inicial + Crecimiento real - Consumo real
-
   let balance-neto (total-inicial + crecimiento-diario-total - total-consumo)
-
-  ;; Cambio real observado en el stock
   let cambio-real (total-final - total-inicial)
-
-  ;; Residuo de verificación (debería ser cercano a 0)
   let residuo (balance-neto - total-final)
 
+  report (list promedio-kgms-final-dia total-inicial total-final balance-neto cambio-real residuo)
 
-  ;; ============================================================
-  ;; REPORTE DIARIO
-  ;; ============================================================
+end
+
+to reportar-dia [dia stats-consumo stats-forraje]
+
+  let promedio-consumo item 0 stats-consumo
+  let max-consumo item 1 stats-consumo
+  let min-consumo item 2 stats-consumo
+  let total-consumo item 3 stats-consumo
+
+  let promedio-kgms-final-dia item 0 stats-forraje
+  let total-inicial item 1 stats-forraje
+  let total-final item 2 stats-forraje
+  let balance-neto item 3 stats-forraje
+  let cambio-real item 4 stats-forraje
+  let residuo item 5 stats-forraje
 
   print (word "=== DÍA " dia " FINALIZADO ===")
 
@@ -920,7 +1035,7 @@ to cerrar-dia
   print (word "📦 Forraje total al inicio (kg): "
               round total-inicial)
 
-  print (word "🌱 Crecimiento real del día (kg): "
+  print (word "🌱 crecimiento-del-último-tick (kg): "
               round crecimiento-diario-total)
 
   print (word "🐄 Consumo total de vacas (kg): "
@@ -938,29 +1053,40 @@ to cerrar-dia
   print (word "🧪 Residuo de balance (≈0 esperado): "
               precision residuo 4)
 
+end
 
-  ;; ============================================================
-  ;; ACUMULACIÓN GLOBAL DE LA SIMULACIÓN
-  ;; ============================================================
+to actualizar-rodeo [stats-consumo]
 
+  let total-consumo item 3 stats-consumo
+
+  ;; acumulación global
   set consumo-total-simulacion
       consumo-total-simulacion + total-consumo
 
+  ;; actualización biológica
+  actualizar-peso-vivo
 
-  ;; ============================================================
-  ;; ACTUALIZACIÓN DE GRÁFICOS
-  ;; ============================================================
-
+  ;; gráficos
   actualizar-grafico-consumo
- ; actualizar-grafico-disponibilidad
+  graficar-distribucion-peso-vacas
 
+end
 
-  ;; ============================================================
-  ;; REINICIO DE VARIABLES DIARIAS
-  ;; ============================================================
+to reiniciar-variables-diarias [stats-consumo]
+
+  let max-consumo item 1 stats-consumo
+  let min-consumo item 2 stats-consumo
 
   ask vacas [
     set consumo-diario 0
+  ]
+
+  if min-consumo < consumo-min-historico [
+    set consumo-min-historico min-consumo
+  ]
+
+  if max-consumo > consumo-max-historico [
+    set consumo-max-historico max-consumo
   ]
 
 end
@@ -1120,6 +1246,7 @@ to cerrar-simulacion
 
   Disponibilidades-Finales
 
+
   ;; ===============================
   ;; Cálculos locales compatibles
   ;; ===============================
@@ -1131,6 +1258,28 @@ to cerrar-simulacion
         (consumo-total-simulacion / DIAS-PASTOREO) 0
 
   let produccion-diaria-campo precision (TCrec * 200) 0
+
+;; ============================================================
+;; INFORME DEL ORDEN DE PASTOREO
+;; ============================================================
+
+  let entradas-totales length historial-pastoreo
+  let parcelas-distintas remove-duplicates historial-pastoreo
+  let n-parcelas-distintas length parcelas-distintas
+  let salteos-totales length historial-salteos
+  let parcelas-salteadas remove-duplicates historial-salteos
+
+  print "=============================================="
+  print "Orden de pastoreo observado durante la corrida:"
+  print historial-pastoreo
+  print (word "Entradas totales a parcelas: " entradas-totales)
+  print (word "Parcelas distintas utilizadas: " n-parcelas-distintas)
+  print (word "Parcelas utilizadas al menos una vez: " parcelas-distintas)
+
+
+  print (word "Salteos totales de parcelas: " salteos-totales)
+  print (word "Parcelas salteadas al menos una vez: " parcelas-salteadas)
+  print "=============================================="
 
   ;; ===============================
   ;; Mensaje emergente final
@@ -1150,6 +1299,7 @@ to cerrar-simulacion
     "Puede revisar los resultados en la consola o "
     "reprogramar el pastoreo para una nueva simulación."
   )
+
 end
 
 to registrar-inicio-dia
@@ -1246,6 +1396,428 @@ to-report consumo-promedio-diario-vaca
          2
 
 end
+
+
+to dibujar-alambrados-internos
+
+  ;; solo si hay subdivisiones
+  if n-parcelas <= 2 [ stop ]
+
+  ;; limpiar subdivisiones previas
+  ask postes with [tipo-poste = "secundario"] [ die ]
+  ask alambrados [ die ]
+
+  ;; detectar límites reales entre parcelas
+  let limites sort remove-duplicates
+      [pxcor] of patches with
+      [ patch-at 1 0 != nobody
+        and plabel != [plabel] of patch-at 1 0 ]
+
+  ;; dibujar alambrados
+  foreach limites [ xline ->
+
+    let ymin (min-pycor - 0.4)
+    let ymax (max-pycor + 0.4)
+
+    let p1 nobody
+    let p2 nobody
+
+    create-postes 1 [
+      setxy (xline + 0.5) ymin
+      set shape "square"
+      set color brown
+      set size 1
+      set tipo-poste "secundario"
+      set p1 self
+    ]
+
+    create-postes 1 [
+      setxy (xline + 0.5) ymax
+      set shape "square"
+      set color brown
+      set size 1
+      set tipo-poste "secundario"
+      set p2 self
+    ]
+
+    ask p1 [
+      create-alambrado-with p2 [
+        set color pink
+        set thickness 0.3
+      ]
+    ]
+
+  ]
+
+end
+
+to dibujar-infraestructura-campo
+
+  ;; ============================================================
+  ;; LIMPIAR INFRAESTRUCTURA EXISTENTE
+  ;; ============================================================
+
+  ask postes [ die ]
+  ask alambrados [ die ]
+
+
+  ;; ============================================================
+  ;; DEFINIR LÍMITES DEL CAMPO
+  ;; ============================================================
+
+  let xmin (min-pxcor - 0.4)
+  let xmax (max-pxcor + 0.4)
+  let ymin (min-pycor - 0.4)
+  let ymax (max-pycor + 0.4)
+
+
+  ;; ============================================================
+  ;; CREAR POSTES PERIMETRALES
+  ;; ============================================================
+
+  let postes-perimetro []
+
+  foreach (list
+      (list xmin ymin)
+      (list xmax ymin)
+      (list xmax ymax)
+      (list xmin ymax)
+  )
+  [ coord ->
+
+    create-postes 1 [
+      setxy item 0 coord item 1 coord
+      set shape "square"
+      set size 1
+      set color brown
+      set tipo-poste "perimetral"
+    ]
+
+    set postes-perimetro lput one-of postes with
+      [tipo-poste = "perimetral" and xcor = item 0 coord and ycor = item 1 coord]
+      postes-perimetro
+  ]
+
+
+  ;; ============================================================
+  ;; CREAR ALAMBRADO PERIMETRAL
+  ;; ============================================================
+
+  (foreach postes-perimetro (lput first postes-perimetro but-first postes-perimetro)
+    [ [p1 p2] ->
+      ask p1 [
+        create-alambrado-with p2 [
+          set color pink
+          set thickness 0.3
+        ]
+      ]
+    ])
+
+
+  ;; ============================================================
+  ;; CREAR ALAMBRADO CENTRAL
+  ;; ============================================================
+
+  let cantidad-postes 11
+  let y-central (min-pycor + max-pycor) / 2
+  let x-inicio min-pxcor
+  let x-fin max-pxcor
+  let paso (x-fin - x-inicio) / (cantidad-postes - 1)
+
+  let postes-centrales []
+
+  repeat cantidad-postes [
+
+    let indice length postes-centrales
+    let x-pos x-inicio + (indice * paso)
+
+    create-postes 1 [
+      setxy x-pos (y-central + 0.5)
+      set shape "square"
+      set color brown
+      set size 1.05
+      set tipo-poste "central"
+    ]
+
+    set postes-centrales lput one-of postes with
+      [tipo-poste = "central" and xcor = x-pos]
+      postes-centrales
+  ]
+
+
+  ;; ============================================================
+  ;; CONECTAR POSTES DEL ALAMBRADO CENTRAL
+  ;; ============================================================
+
+  (foreach (but-last postes-centrales) (but-first postes-centrales)
+    [ [p1 p2] ->
+      ask p1 [
+        create-alambrado-with p2 [
+          set color red
+          set thickness 0.5
+        ]
+      ]
+    ])
+
+end
+
+to elegir-siguiente-parcela
+
+  ;; ------------------------------------------------------------
+  ;; 1. VARIABLES DE CONTROL
+  ;; ------------------------------------------------------------
+
+  let intentos 0                 ;; cuántas parcelas fueron evaluadas
+  let parcela-candidata (parcela-pastoreo - 1)
+  let hubo-salto false           ;; indica si ya se detectaron excedentes
+
+
+  ;; ------------------------------------------------------------
+  ;; 2. BÚSQUEDA DE PARCELA APTA
+  ;; ------------------------------------------------------------
+
+  while [intentos < n-parcelas] [
+
+    ;; rotación circular de parcelas
+    if parcela-candidata < 1 [
+      set parcela-candidata n-parcelas
+    ]
+
+
+    ;; ------------------------------------------------------------
+    ;; 3. DISPONIBILIDAD PROMEDIO DE LA PARCELA (kg MS/ha)
+    ;; ------------------------------------------------------------
+
+    let disp-parcela-ha
+        (mean [kgms] of patches with [plabel = parcela-candidata]) / sup-pach
+
+
+    ;; ------------------------------------------------------------
+    ;; 4. DECISIÓN DE MANEJO
+    ;; ------------------------------------------------------------
+    ;; la parcela solo se pastorea si está dentro del rango permitido
+
+    ifelse (disp-parcela-ha >= Disp-Mini-Par) and
+           (disp-parcela-ha <= Disp-Maxima)
+
+    [
+
+      ;; --------------------------------------------------------
+      ;; PARCELA APTA PARA PASTOREO
+      ;; --------------------------------------------------------
+
+      print (word "Parcela " parcela-candidata
+                  " → "
+                  precision disp-parcela-ha 0
+                  " kgMS/ha → PASTOREO")
+
+      set parcela-pastoreo parcela-candidata
+
+      ;; registrar orden real de pastoreo
+      set historial-pastoreo lput parcela-pastoreo historial-pastoreo
+
+      ;; mover rodeo
+      ask vacas [
+        move-to one-of patches with [plabel = parcela-pastoreo]
+      ]
+
+      stop
+    ]
+
+    [
+;; --------------------------------------------------------
+;; PARCELA SALTEADA
+;; --------------------------------------------------------
+
+set hubo-salto true
+
+set historial-salteos lput parcela-candidata historial-salteos
+
+if disp-parcela-ha > Disp-Maxima [
+  print (word "Parcela " parcela-candidata
+              " → "
+              precision disp-parcela-ha 0
+              " kgMS/ha → SALTEADA (exceso)")
+]
+
+if disp-parcela-ha < Disp-Mini-Par [
+  print (word "Parcela " parcela-candidata
+              " → "
+              precision disp-parcela-ha 0
+              " kgMS/ha → SALTEADA (insuficiente)")
+]
+    ]
+
+    ;; avanzar a la siguiente parcela
+    set parcela-candidata parcela-candidata - 1
+    set intentos intentos + 1
+  ]
+
+
+  ;; ------------------------------------------------------------
+  ;; 5. DETECCIÓN DE EXCEDENTE SISTÉMICO
+  ;; ------------------------------------------------------------
+
+  if hubo-salto and not excedente-detectado [
+    print "--------------------------------------"
+    print "El sistema comienza a generar excedentes de forraje"
+    print "--------------------------------------"
+    set excedente-detectado true
+  ]
+
+
+  ;; ------------------------------------------------------------
+  ;; 6. CASO EXTREMO: NINGUNA PARCELA DISPONIBLE
+  ;; ------------------------------------------------------------
+
+  user-message
+  "No hay parcelas disponibles dentro del rango de pastoreo"
+
+end
+to imprimir-configuracion
+  print "=============================================="
+  print "CONFIGURACIÓN DE LA SIMULACIÓN"
+  print "=============================================="
+
+  print (word "🐄 Número de vacas: " n-vacas)
+
+  print (word "🌿 Disponibilidad mínima inicial: "
+              Disp-Minima " kg MS/ha")
+
+  print (word "🌱 Tasa de crecimiento (TCrec): "
+              TCrec " kg MS/ha/día")
+
+  print (word "🌾 Disponibilidad máxima permitida: "
+              Disp-Maxima " kg MS/ha")
+
+  print (word "📦 Número de parcelas: " n-parcelas)
+
+  print (word "⏱ Días de permanencia: "
+              dias-permanencia)
+
+  print (word "🔁 Vueltas programadas: "
+              vueltas)
+
+  print (word "🌎 Superficie total del sistema: "
+              has " ha")
+
+  print "=============================================="
+end
+
+to crear-rollos
+
+  set kgms-por-rollo 550
+  set rollos-iniciales round (n-vacas * 0.2)
+
+  if rollos-iniciales <= 0 [ stop ]
+
+  ;; guardamos el who que tendrá el primer rollo
+  set who-primer-rollo (max [who] of turtles) + 1
+
+  create-rollos rollos-iniciales [
+    set color brown
+    set shape "target"
+    set size 1
+    ubicar-rollo
+  ]
+
+end
+
+to ubicar-rollo
+
+  let columnas 10
+
+  ;; índice relativo dentro del conjunto de rollos
+  let indice (who - who-primer-rollo)
+
+  let columna (indice mod columnas)
+  let fila floor (indice / columnas)
+
+  ;; ancho real de la pila
+  let ancho-pila min (list columnas rollos-iniciales)
+
+  ;; base centrada horizontalmente
+  let x-base round (((min-pxcor + max-pxcor) / 2) - ((ancho-pila - 1) / 2))
+
+  ;; parte superior del mundo
+  let y-base (max-pycor - 1)
+
+  setxy (x-base + columna) (y-base - fila)
+
+end
+
+to-report contar-rangos-peso
+
+  let r1 count vacas with [pV < peso * 0.90]
+  let r2 count vacas with [pV >= peso * 0.90 and pV < peso * 0.95]
+  let r3 count vacas with [pV >= peso * 0.95 and pV < peso * 1.05]
+  let r4 count vacas with [pV >= peso * 1.05 and pV < peso * 1.10]
+  let r5 count vacas with [pV >= peso * 1.10]
+
+  report (list r1 r2 r3 r4 r5)
+
+end
+
+to graficar-distribucion-peso-vacas
+
+  set-current-plot "Distribucion Peso Vacas"
+  clear-plot
+
+  ;; --------------------------
+  ;; PEN INICIAL
+  ;; --------------------------
+  let conteos-inicial contar-rangos-peso-inicial
+
+  set-current-plot-pen "Inicial"
+
+  let i 0
+  while [i < 5] [
+    plotxy (i + 1 - 0.15) item i conteos-inicial
+    set i i + 1
+  ]
+
+  ;; --------------------------
+  ;; PEN FINAL
+  ;; --------------------------
+  let conteos-final contar-rangos-peso-actual
+
+  set-current-plot-pen "Final"
+
+  set i 0
+  while [i < 5] [
+    plotxy (i + 1 + 0.15) item i conteos-final
+    set i i + 1
+  ]
+
+end
+
+to actualizar-peso-vivo
+
+  ask vacas [
+
+    ;; consumo de mantenimiento (2 % del peso vivo)
+    let consumo-mant 0.02 * pV
+
+    ;; diferencia entre consumo real y mantenimiento
+    let diferencia consumo-diario - consumo-mant
+
+    ;; cambio de peso según signo de la diferencia
+    let cambio-peso 0
+
+    if diferencia > 0 [
+      set cambio-peso diferencia * 0.25
+    ]
+
+    if diferencia < 0 [
+      set cambio-peso diferencia * 0.30
+    ]
+
+    ;; actualizar peso vivo
+    set pV pV + cambio-peso
+
+  ]
+
+end
 @#$#@#$#@
 GRAPHICS-WINDOW
 209
@@ -1256,7 +1828,7 @@ GRAPHICS-WINDOW
 -1
 13.0
 1
-10
+1
 1
 1
 1
@@ -1292,10 +1864,10 @@ NIL
 1
 
 MONITOR
-395
-289
-489
-334
+389
+265
+483
+310
 KgMS/Ha Prom
 mean [kgms / sup-pach] of patches
 0
@@ -1325,10 +1897,10 @@ mean [kgms / sup-pach] of patches with [ plabel = 1]
 11
 
 BUTTON
-17
-406
-174
-453
+12
+473
+169
+520
 Pastorear
 go
 T
@@ -1351,8 +1923,8 @@ Día
 KgMS
 9.0
 10.0
-7.0
-7.0
+9.0
+9.0
 true
 true
 "" ""
@@ -1363,10 +1935,10 @@ PENS
 "Mediana" 1.0 0 -7500403 true "" ""
 
 PLOT
-653
-592
-902
-833
+456
+542
+705
+812
 Rango de Disponibilidad (kg MS/ha)
 Parcela
 Disponibilidad
@@ -1386,10 +1958,10 @@ PENS
 "Fin-Max" 1.0 1 -2674135 true "" ""
 
 PLOT
-207
+10
 543
-646
-834
+449
+805
 Disponibilidad Parcelas
 Parcelas 
 Disponibilidad (kg MS/ha) 
@@ -1405,10 +1977,10 @@ PENS
 "Final" 0.5 1 -2674135 true "" ""
 
 PLOT
-655
-320
-904
-571
+714
+541
+963
+792
 Disponibilidad
 Días
 Disponibilidad media (kg MS/ha) 
@@ -1430,7 +2002,7 @@ CHOOSER
 n-parcelas
 n-parcelas
 2 4 8 12 16 20
-2
+0
 
 CHOOSER
 103
@@ -1440,7 +2012,7 @@ CHOOSER
 dias-permanencia
 dias-permanencia
 1 2 3 5 8 12 17 23 30
-4
+8
 
 CHOOSER
 4
@@ -1497,10 +2069,10 @@ Disp-Minima
 20
 
 BUTTON
-27
-172
-184
-223
+22
+239
+179
+290
 Reprogramar Pastoreo
 Reprogramar-Pastoreo
 NIL
@@ -1514,10 +2086,10 @@ NIL
 0
 
 SWITCH
-33
-360
-147
-393
+28
+427
+142
+460
 Regenerar
 Regenerar
 0
@@ -1525,10 +2097,10 @@ Regenerar
 -1000
 
 TEXTBOX
-14
-231
-196
-350
+9
+298
+191
+417
               ´Regenerar´\n ON: SI CAMBIA. supone que el pastoreo anterior era de la misma manera que se propone actualmente.\n OFF: NO CAMBIA la disponibilidad de las parcelas al Reprogramar Pastoreo.
 12
 0.0
@@ -1546,10 +2118,10 @@ mean [kgms / sup-pach] of patches
 12
 
 MONITOR
-759
-266
-844
-315
+909
+86
+994
+135
 Cons.Medio
 consumo-promedio-diario-vaca
 1
@@ -1566,6 +2138,121 @@ round (ticks / 48)
 0
 1
 12
+
+TEXTBOX
+35
+527
+185
+545
+Versión 2.0
+11
+0.0
+1
+
+MONITOR
+910
+147
+1000
+196
+Cons.Min
+consumo-min-historico
+1
+1
+12
+
+MONITOR
+910
+28
+992
+77
+Cons.Max
+consumo-max-historico
+1
+1
+12
+
+CHOOSER
+3
+175
+95
+220
+Disp-Maxima
+Disp-Maxima
+2000 2500 3000 3500 4000 4500 5000
+2
+
+MONITOR
+913
+206
+1005
+255
+Parcela Past
+parcela-pastoreo
+0
+1
+12
+
+MONITOR
+915
+270
+1002
+315
+Disponibilidad
+(mean [kgms] of patches with [plabel = parcela-pastoreo]) / sup-pach
+0
+1
+11
+
+MONITOR
+916
+323
+973
+368
+Rollos
+count rollos
+0
+1
+11
+
+MONITOR
+916
+372
+981
+417
+MS Rollos
+kgms-por-rollo * (count rollos)
+17
+1
+11
+
+CHOOSER
+104
+176
+202
+221
+Disp-Mini-Par
+Disp-Mini-Par
+800 1000 1200 1400
+0
+
+PLOT
+653
+325
+898
+520
+Distribucion Peso Vacas
+Rango Peso
+Cantidad Vacas
+0.0
+6.0
+0.0
+25.0
+true
+true
+"" ""
+PENS
+"INICIAL" 0.5 1 -13345367 true "" ""
+"FINAL" 0.5 1 -2674135 true "" ""
 
 @#$#@#$#@
 ## Título:
